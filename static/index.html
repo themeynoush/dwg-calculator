@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DWG 3D Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; font: 14px system-ui, sans-serif; color: #1f2328; }
+  aside { width: 260px; flex-shrink: 0; display: flex; flex-direction: column; background: #f6f8fa; border-right: 1px solid #d0d7de; }
+  header { padding: 12px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d0d7de; }
+  header h1 { font-size: 15px; margin: 0; }
+  button { cursor: pointer; border: 1px solid #d0d7de; background: #fff; border-radius: 6px; padding: 4px 10px; }
+  button:disabled { opacity: .5; cursor: wait; }
+  #list { flex: 1; overflow-y: auto; padding: 8px; }
+  .card { display: block; width: 100%; text-align: left; padding: 6px; margin-bottom: 8px; border-radius: 8px; }
+  .card.active { border-color: #0969da; box-shadow: 0 0 0 2px #0969da40; }
+  .card img { width: 100%; aspect-ratio: 4/3; background: #eaeef2; border-radius: 4px; display: block; }
+  .card .name { font-weight: 600; margin-top: 4px; word-break: break-all; }
+  .card .meta { color: #656d76; font-size: 12px; }
+  .errors { color: #cf222e; font-size: 12px; padding: 0 4px; }
+  .empty { color: #656d76; padding: 12px 4px; }
+  main { flex: 1; position: relative; background: #fff; }
+  #viewer { width: 100%; height: 100%; display: block; }
+  #hint { position: absolute; inset: 0; display: grid; place-items: center; color: #656d76; pointer-events: none; }
+  #help { position: absolute; bottom: 8px; right: 12px; color: #656d76; font-size: 12px; }
+  #legend { position: absolute; top: 8px; right: 8px; max-height: calc(100% - 48px); overflow-y: auto;
+            background: #ffffffe6; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+  #legend:empty { display: none; }
+  #legend h2 { font-size: 12px; margin: 0 0 6px; text-transform: uppercase; color: #656d76; }
+  #legend label { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; white-space: nowrap; }
+  #legend .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #0003; flex-shrink: 0; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<aside>
+  <header><h1>DWG files</h1><button id="refresh">Refresh</button></header>
+  <div id="list"></div>
+</aside>
+<main>
+  <canvas id="viewer"></canvas>
+  <div id="hint">Select a file on the left</div>
+  <div id="legend"></div>
+  <div id="help">Left drag: rotate · Right drag: pan · Wheel: zoom</div>
+</main>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+const loader = new GLTFLoader();
+const cache = new Map();   // url → Promise<gltf scene>
+
+function loadModel(url) {
+  if (!cache.has(url)) cache.set(url, loader.loadAsync(url).then(g => g.scene));
+  return cache.get(url).then(scene => styled(scene.clone()));
+}
+
+// Keep the per-layer material from the .glb (colour, mirror, glass...);
+// just push faces back a little so outlines stay visible.
+function styled(root) {
+  root.traverse(obj => {
+    if (obj.isMesh) {
+      obj.material = obj.material.clone();
+      Object.assign(obj.material, {
+        side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+      });
+      if (obj.material.transparent) obj.material.depthWrite = false;
+    }
+    if (obj.isLine || obj.isLineSegments) obj.material = new THREE.LineBasicMaterial({ color: 0x24292f });
+  });
+  return root;
+}
+
+// studio reflection map (one per renderer: GPU textures can't cross WebGL contexts)
+// — makes mirrors and brass read as such
+const envMaps = new WeakMap();
+
+function makeScene(renderer) {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xffffff);
+  if (!envMaps.has(renderer)) {
+    envMaps.set(renderer, new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture);
+  }
+  scene.environment = envMaps.get(renderer);
+  scene.environmentIntensity = 0.6;
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+  sun.position.set(2, 3, 1.5);
+  scene.add(sun);
+  return scene;
+}
+
+function frame(camera, object, controls) {
+  const box = new THREE.Box3().setFromObject(object);
+  const centre = box.getCenter(new THREE.Vector3());
+  const radius = box.getBoundingSphere(new THREE.Sphere()).radius || 1;
+  const dist = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.1;
+  camera.position.copy(centre).add(new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(dist));
+  camera.near = dist / 100; camera.far = dist * 100;
+  camera.updateProjectionMatrix();
+  camera.lookAt(centre);
+  if (controls) { controls.target.copy(centre); controls.update(); }
+}
+
+// ---------- main viewer ----------
+const canvas = document.getElementById("viewer");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+const scene = makeScene(renderer);
+const grid = new THREE.GridHelper(2, 20, 0xd0d7de, 0xeaeef2);
+grid.position.y = -0.5;
+scene.add(grid);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+let current = null;
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = canvas;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(canvas);
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+async function show(entry, card) {
+  document.querySelectorAll(".card").forEach(c => c.classList.toggle("active", c === card));
+  document.getElementById("hint").textContent = "Loading…";
+  const model = await loadModel(entry.model_url);
+  if (current) scene.remove(current);
+  current = model;
+  scene.add(model);
+  grid.position.y = new THREE.Box3().setFromObject(model).min.y;
+  frame(camera, model, controls);
+  showLegend(model);
+  document.getElementById("hint").textContent = "";
+}
+
+// ---------- material legend (one row per CAD layer / material) ----------
+function showLegend(model) {
+  const legend = document.getElementById("legend");
+  const groups = new Map();   // material name → meshes
+  model.traverse(obj => {
+    if (!obj.isMesh || !obj.material.name || obj.material.name === "faces") return;
+    if (!groups.has(obj.material.name)) groups.set(obj.material.name, []);
+    groups.get(obj.material.name).push(obj);
+  });
+  legend.innerHTML = groups.size ? "<h2>Materials</h2>" : "";
+  for (const [name, meshes] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+    const row = document.createElement("label");
+    row.innerHTML = `<input type="checkbox" checked><span class="swatch"></span><span></span>`;
+    row.querySelector(".swatch").style.background = "#" + meshes[0].material.color.getHexString(THREE.SRGBColorSpace);
+    row.lastElementChild.textContent = name;
+    row.querySelector("input").onchange = e => meshes.forEach(m => { m.visible = e.target.checked; });
+    legend.append(row);
+  }
+}
+
+// ---------- thumbnails (one shared offscreen renderer) ----------
+const thumbRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+thumbRenderer.setSize(240, 180);
+const thumbCamera = new THREE.PerspectiveCamera(45, 4 / 3, 0.01, 100);
+
+async function thumbnail(url) {
+  const s = makeScene(thumbRenderer);
+  const model = await loadModel(url);
+  s.add(model);
+  frame(thumbCamera, model);
+  thumbRenderer.render(s, thumbCamera);
+  return thumbRenderer.domElement.toDataURL("image/png");
+}
+
+// ---------- sidebar ----------
+const list = document.getElementById("list");
+const fmtSize = b => b > 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.ceil(b / 1e3) + " KB";
+
+async function render(catalog) {
+  list.innerHTML = "";
+  if (!catalog.models.length) {
+    list.innerHTML = '<div class="empty">No models yet. Put .dwg files in the <code>uploads/</code> folder and click Refresh.</div>';
+  }
+  const cards = catalog.models.map(entry => {
+    const card = document.createElement("button");
+    card.className = "card";
+    card.innerHTML = `<img alt=""><div class="name"></div><div class="meta"></div>`;
+    card.querySelector(".name").textContent = entry.name;
+    card.querySelector(".meta").textContent = `${entry.source} · ${fmtSize(entry.size_bytes)}`;
+    card.onclick = () => show(entry, card);
+    list.append(card);
+    return [entry, card];
+  });
+  for (const [name, reason] of Object.entries(catalog.errors || {})) {
+    const div = document.createElement("div");
+    div.className = "errors";
+    div.textContent = `⚠ ${name}: ${reason}`;
+    list.append(div);
+  }
+  for (const [entry, card] of cards) {   // sequential: keeps the browser responsive
+    try { card.querySelector("img").src = await thumbnail(entry.model_url); }
+    catch (e) { console.error(entry.name, e); }
+  }
+}
+
+const refreshBtn = document.getElementById("refresh");
+refreshBtn.onclick = async () => {
+  refreshBtn.disabled = true; refreshBtn.textContent = "Processing…";
+  try {
+    cache.clear();
+    await render(await (await fetch("/api/refresh", { method: "POST" })).json());
+  } finally { refreshBtn.disabled = false; refreshBtn.textContent = "Refresh"; }
+};
+
+render(await (await fetch("/api/catalog")).json());
+</script>
+</body>
+</html>
