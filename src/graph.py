@@ -1,6 +1,6 @@
 """Pipeline definition: wires the nodes into a LangGraph state graph.
 
-scan → convert → parse → extract_geometry → export_gltf → build_catalog
+scan → convert → parse → extract_geometry → measure → export_gltf → price → build_catalog
 """
 from langgraph.graph import END, START, StateGraph
 
@@ -8,11 +8,13 @@ from src.nodes.build_catalog import build_catalog
 from src.nodes.convert import convert
 from src.nodes.export_gltf import export_gltf
 from src.nodes.extract_geometry import extract_geometry
+from src.nodes.measure import measure
 from src.nodes.parse import parse
+from src.nodes.price import price
 from src.nodes.scan import scan
 from src.state import PipelineState
 
-NODES = [scan, convert, parse, extract_geometry, export_gltf, build_catalog]
+NODES = [scan, convert, parse, extract_geometry, measure, export_gltf, price, build_catalog]
 
 
 def build_graph():

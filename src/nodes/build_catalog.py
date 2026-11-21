@@ -24,6 +24,7 @@ def build_catalog(state: PipelineState) -> dict:
             model_url=f"{MODELS_URL}/{glb.name}?v={int(glb.stat().st_mtime)}",
             source=dwg.name,
             size_bytes=dwg.stat().st_size,
+            materials=state.costs.get(dwg.stem, []),
         ))
     payload = {
         "models": [e.model_dump() for e in catalog],

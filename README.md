@@ -5,7 +5,7 @@ Drop files in `uploads/`, run one command, open `http://localhost:8000`: the lef
 menu shows a preview of each file; click one to rotate, zoom and pan it in 3D.
 
 ```
-scan → convert → parse → extract_geometry → export_gltf → build_catalog
+scan → convert → parse → extract_geometry → measure → export_gltf → price → build_catalog
 ```
 
 ## Quick start
@@ -25,7 +25,7 @@ uv run python -m src.main      # then open http://localhost:8000
 - Input: `.dwg` files dropped in an `uploads/` folder.
 - Output: a local web page — left sidebar with a preview per file, 3D viewer in the centre.
 - Constraint: the end user needs no CAD software, only a browser.
-- Architecture: six single-responsibility nodes, one typed state, LangGraph
+- Architecture: eight single-responsibility nodes, one typed state, LangGraph
   (same pattern as `jean-infra-opt-ai`).
 
 ### Step 2 — Choose the tools
@@ -54,15 +54,17 @@ uv add --dev pytest ruff mypy httpx
 - `PipelineState` — what flows through the nodes; each node fills one field
   and adds to `errors` when a file must be skipped.
 
-### Step 5 — Write the six nodes (`src/nodes/`)
+### Step 5 — Write the eight nodes (`src/nodes/`)
 | # | Node | Role |
 |---|---|---|
-| 1 | `scan` | List `*.dwg` (case-insensitive); skip files whose `.glb` is newer than the DWG |
+| 1 | `scan` | List `*.dwg` (case-insensitive); skip files whose `.glb` and take-off are newer than the DWG |
 | 2 | `convert` | DWG → DXF with `dwg2dxf`; clear error if LibreDWG is missing |
 | 3 | `parse` | Load DXF with ezdxf in recover mode, after repairing LibreDWG quirks |
-| 4 | `extract_geometry` | Expand blocks; 3D faces/meshes → triangles, lines/arcs/curves → segments |
-| 5 | `export_gltf` | Centre, scale to unit size, Z-up → Y-up, write one `.glb` per file |
-| 6 | `build_catalog` | Write `output/catalog.json` (models + per-file errors) for the sidebar |
+| 4 | `extract_geometry` | Expand blocks; 3D faces/meshes → triangles (tagged with their layer = material), lines/arcs/curves → segments |
+| 5 | `measure` | Per material: L, W, H of its bounding box in metres (from `$INSUNITS`), surface = L × W → `output/<name>.takeoff.json` |
+| 6 | `export_gltf` | Centre, scale to unit size, Z-up → Y-up, one mesh + PBR material per layer, one `.glb` per file |
+| 7 | `price` | Read `uploads/prices.csv` (`material,unit,unit_price,currency`; unit `m2` or `m`) and cost every take-off |
+| 8 | `build_catalog` | Write `output/catalog.json` (models, priced materials, per-file errors) for the sidebar |
 
 Rule for every node: a bad file is **logged and skipped**, never fatal.
 
@@ -72,7 +74,7 @@ Before going further, checked with a throwaway script that:
 - LibreDWG can produce a real DWG from a DXF (`dxf2dwg`) — used for tests ✔
 
 ### Step 7 — Wire the graph (`src/graph.py`, `src/pipeline.py`)
-- `build_graph()` chains the six nodes `START → … → END`.
+- `build_graph()` chains the eight nodes `START → … → END`.
 - `run_pipeline(uploads_dir, output_dir, force)` runs it once and returns the catalog.
 
 ### Step 8 — Build the web server (`src/server.py`, `src/main.py`)
@@ -103,7 +105,9 @@ text), and turned into a real DWG with `dxf2dwg` when LibreDWG is installed.
 | `test_convert` | missing binary message, real DWG conversion, corrupt file skipped |
 | `test_parse` | valid DXF, garbage skipped, handle repair |
 | `test_extract_geometry` | cube → 12 triangles, blocks expanded, text skipped, empty → error |
-| `test_export_gltf` | centring, scaling, Z-up → Y-up, `.glb` reloads |
+| `test_measure` | unit conversion, L/W/H from bounding box, surface = L × W, take-off file |
+| `test_export_gltf` | centring, scaling, Z-up → Y-up, `.glb` reloads, one material per layer |
+| `test_price` | CSV parsing, m2 / m pricing, unknown materials, bad CSV reported |
 | `test_build_catalog` | only converted DWGs listed, errors written |
 | `test_server` | all routes (pipeline mocked) |
 | `test_pipeline` | full DWG → catalog run, then incremental re-run |
@@ -142,10 +146,10 @@ src/
   pipeline.py         run the graph once
   server.py           FastAPI routes
   main.py             entrypoint
-  nodes/              the six nodes
+  nodes/              the eight nodes
 static/index.html     the viewer
-uploads/              your .dwg files
-output/               generated .dxf, .glb, catalog.json (git-ignored)
+uploads/              your .dwg files + prices.csv (price list)
+output/               generated .dxf, .glb, .takeoff.json, catalog.json (git-ignored)
 tests/                one test file per node + server + end-to-end
 ```
 

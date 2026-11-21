@@ -31,6 +31,11 @@ def test_scan_skips_up_to_date_unless_forced(tmp_path):
     glb = tmp_path / "out" / "a.glb"
     glb.write_bytes(b"x")
     os.utime(dwg, (1000, 1000))
+    assert len(scan(_state(tmp_path))["pending"]) == 1    # no take-off yet → measure it
+    takeoff = tmp_path / "out" / "a.takeoff.json"
+    takeoff.write_text('[{"layer": "OAK", "length_m": 1, "height_m": 0, "area_m2": 1}]')
+    assert len(scan(_state(tmp_path))["pending"]) == 1    # older format (no width) → redo
+    takeoff.write_text("[]")
     assert scan(_state(tmp_path))["pending"] == []
     assert len(scan(_state(tmp_path, force=True))["pending"]) == 1
     os.utime(dwg, (glb.stat().st_mtime + 10,) * 2)   # DWG edited after export
